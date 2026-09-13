@@ -466,6 +466,95 @@ def build_full(meta):
     return path
 
 
+def build_full_pdf(meta):
+    """Readable A4 PDF of the same full script. LibreOffice Writer is broken here."""
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    pdfmetrics.registerFont(TTFont("Sans", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"))
+    pdfmetrics.registerFont(TTFont("SansBold", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"))
+
+    def md(text):
+        # **bold** -> <b>
+        out = []
+        parts = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").split("**")
+        for i, part in enumerate(parts):
+            out.append(f"<b>{part}</b>" if i % 2 == 1 else part)
+        return "".join(out)
+
+    styles = {
+        "center_b": ParagraphStyle("cb", fontName="SansBold", fontSize=12, leading=16, alignment=TA_CENTER, textColor="#111111", spaceAfter=4),
+        "center": ParagraphStyle("c", fontName="Sans", fontSize=11, leading=15, alignment=TA_CENTER, textColor="#111111", spaceAfter=4),
+        "title": ParagraphStyle("t", fontName="SansBold", fontSize=14, leading=18, alignment=TA_CENTER, textColor="#111111", spaceAfter=6),
+        "h": ParagraphStyle("h", fontName="SansBold", fontSize=13, leading=17, alignment=TA_LEFT, textColor="#111111", spaceBefore=12, spaceAfter=6),
+        "cue": ParagraphStyle("cue", fontName="SansBold", fontSize=10, leading=13, alignment=TA_LEFT, textColor="#333333", spaceBefore=6, spaceAfter=2),
+        "body": ParagraphStyle("b", fontName="Sans", fontSize=12, leading=17, alignment=TA_LEFT, textColor="#111111", spaceAfter=6),
+        "small": ParagraphStyle("s", fontName="Sans", fontSize=10, leading=14, alignment=TA_LEFT, textColor="#111111", spaceAfter=5),
+        "footer": ParagraphStyle("f", fontName="Sans", fontSize=8, leading=10, alignment=TA_CENTER, textColor="#333333"),
+    }
+
+    path = OUT / meta["full_name"].replace(".docx", ".pdf")
+    doc = SimpleDocTemplate(
+        str(path), pagesize=A4,
+        leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+        title=meta["fio"], author=meta["fio"],
+    )
+    story = []
+    story.append(Paragraph("ГАПОУ ИО «Иркутский технологический колледж» (ИТК)", styles["center_b"]))
+    story.append(Paragraph("Специальность 38.02.08 «Торговое дело»  ·  3 курс  ·  группа 69", styles["center"]))
+    story.append(Paragraph(meta["fio"], styles["center_b"]))
+    story.append(Paragraph("Отдельное выступление  ·  один докладчик", styles["center"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(meta["title1"], styles["title"]))
+    story.append(Paragraph(meta["title2"], styles["title"]))
+    story.append(Paragraph(meta["hall"], styles["center"]))
+    story.append(Paragraph("Дата: «____» сентября 2026 г.  ·  Иркутск  ·  регламент 8–10 мин + вопросы", styles["center"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Как пользоваться этим файлом", styles["h"]))
+    story.append(Paragraph("Это страховка, не сценарий “читать каждую букву”. Жирным — удар голосом. Квадратные скобки — время. Строки ПАУЗА / КЛИК — действия, их не произносить.", styles["body"]))
+    story.append(Paragraph("Это отдельное выступление. Второго докладчика на сцене нет. Кликает тот, кто говорит — то есть вы.", styles["body"]))
+    story.append(Paragraph("Оглавление", styles["h"]))
+    for t in meta["toc"]:
+        story.append(Paragraph(t, styles["body"]))
+
+    last = None
+    for slide, cues, time, paras in meta["speech"]:
+        section = meta["section_for"](slide, paras)
+        if section and section != last:
+            story.append(Paragraph(section, styles["h"]))
+            last = section
+        story.append(Paragraph(f"[{time}]   СЛАЙД {slide}   ·   {cues}", styles["cue"]))
+        for para in paras:
+            story.append(Paragraph(md(para), styles["body"]))
+
+    story.append(Paragraph("Вопросы преподавателю — не читать с листа", styles["h"]))
+    story.append(Paragraph("Короткие честные ответы. Если не знаем долю — так и говорим.", styles["body"]))
+    for i, (q, a) in enumerate(meta["qa"], 1):
+        story.append(Paragraph(f"{i}. {q}", styles["h"]))
+        story.append(Paragraph(a, styles["small"]))
+    story.append(Paragraph("Источники и оговорки", styles["h"]))
+    story.append(Paragraph("Закрытие записи в реестре не равно провалу живого дела. Тема доклада — механизм и сцены, не рейтинг причин по официальной статистике.", styles["small"]))
+    story.append(Paragraph("Цифры, которые сознательно НЕ произносим как факт: «80% в первый год»; «75% ООО / 65% ИП через год»; «82% из-за cash flow»; проценты CB Insights и Вассермана как будто про ИП в Иркутске.", styles["small"]))
+    for title, url, note in meta["sources"]:
+        story.append(Paragraph(f"{title}. {note} Дата обращения: 13.09.2026. {url}", styles["small"]))
+
+    def footer(canvas, doc_):
+        canvas.saveState()
+        canvas.setFont("Sans", 8)
+        canvas.setFillColorRGB(0.2, 0.2, 0.2)
+        canvas.drawCentredString(A4[0] / 2, 1.2 * cm, f"не читать с листа целиком — это страховка   ·   {doc_.page}")
+        canvas.drawString(2 * cm, A4[1] - 1.2 * cm, meta["header_full"])
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return path
+
+
 def build_cards(meta):
     doc = Document()
     setup_doc(doc, meta["header_cards"])
@@ -778,7 +867,7 @@ def build_pptx_nikita():
                  "Почему «открою такое же» — не стратегия", 26, False, P_DARK)
     plate = round_rect(s, PInches(0.75), PInches(4.7), PInches(7.4), PInches(1.55), P_WHITE, P_DARK, Pt(3))
     add_multiline(s, PInches(0.95), PInches(4.85), PInches(7.0), PInches(1.25),
-                  ["Харитонов Никита Васильевич", "тема 16  ·  вошли последними"], 22, True, P_INK, gap=6)
+                  ["Харитонов Никита Васильевич", "вошли последними"], 22, True, P_INK, gap=6)
     footer(s, 1, total, who)
     notes(s, "СЛАЙД 1 | 0:00\n" + "\n".join(speech[0][3]))
 
@@ -919,7 +1008,7 @@ def build_pptx_taisiya():
                  "Почему дело закрывают до удара рынка", 26, False, P_DARK)
     round_rect(s, PInches(0.75), PInches(4.7), PInches(7.8), PInches(1.55), P_WHITE, P_ACCENT, Pt(3))
     add_multiline(s, PInches(0.95), PInches(4.85), PInches(7.4), PInches(1.25),
-                  ["Карнаухова Таисья Петровна", "тема 18  ·  часы, не характер"], 22, True, P_INK, gap=6)
+                  ["Карнаухова Таисья Петровна", "часы, не характер"], 22, True, P_INK, gap=6)
     footer(s, 1, total, who)
     notes(s, "СЛАЙД 1 | 0:00\n" + "\n".join(speech[0][3]))
 
@@ -1140,10 +1229,12 @@ def pack_downloads(files):
 
     mapping = {
         "НИКИТА_полный_текст.docx": "nikita-polnyy-tekst.docx",
+        "НИКИТА_полный_текст.pdf": "nikita-polnyy-tekst.pdf",
         "НИКИТА_карточки.docx": "nikita-kartochki.docx",
         "НИКИТА_презентация.pptx": "nikita-prezentaciya.pptx",
         "НИКИТА_презентация.pdf": "nikita-prezentaciya.pdf",
         "ТАИСЬЯ_полный_текст.docx": "taisiya-polnyy-tekst.docx",
+        "ТАИСЬЯ_полный_текст.pdf": "taisiya-polnyy-tekst.pdf",
         "ТАИСЬЯ_карточки.docx": "taisiya-kartochki.docx",
         "ТАИСЬЯ_презентация.pptx": "taisiya-prezentaciya.pptx",
         "ТАИСЬЯ_презентация.pdf": "taisiya-prezentaciya.pdf",
@@ -1189,12 +1280,27 @@ def main():
     files.append(build_teacher())
     files.append(build_pptx_nikita())
     files.append(build_pptx_taisiya())
-    for pptx in (OUT / "НИКИТА_презентация.pptx", OUT / "ТАИСЬЯ_презентация.pptx"):
+    files.append(build_full_pdf(NIKITA))
+    files.append(build_full_pdf(TAISIYA))
+
+    def to_pdf(src: Path) -> Path:
+        safe = {
+            "НИКИТА_презентация.pptx": "nikita-prezentaciya.pptx",
+            "ТАИСЬЯ_презентация.pptx": "taisiya-prezentaciya.pptx",
+        }[src.name]
+        tmp = Path("/tmp") / safe
+        shutil.copy2(src, tmp)
         subprocess.run(
-            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(OUT), str(pptx)],
+            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", "/tmp", str(tmp)],
             check=True,
         )
-        files.append(OUT / (pptx.stem + ".pdf"))
+        pdf_tmp = tmp.with_suffix(".pdf")
+        pdf_out = src.with_suffix(".pdf")
+        shutil.copy2(pdf_tmp, pdf_out)
+        return pdf_out
+
+    for src in (OUT / "НИКИТА_презентация.pptx", OUT / "ТАИСЬЯ_презентация.pptx"):
+        files.append(to_pdf(src))
     for old in OLD_NAMES:
         for folder in (OUT, ART):
             pth = folder / old
