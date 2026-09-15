@@ -317,29 +317,70 @@ def upsample(binary: np.ndarray, k: int = 3) -> np.ndarray:
     return np.array(im) > 128
 
 
+def rdp_target(pts: list[tuple[float, float]], lo=24, hi=40) -> list[tuple[float, float]]:
+    """Живой край: 24–40 точек, не пыль PNG и не колбаса."""
+    closed = pts[0] == pts[-1]
+    body = pts[:-1] if closed else list(pts)
+    eps_lo, eps_hi = 0.4, 18.0
+    best = body
+    for _ in range(22):
+        mid = (eps_lo + eps_hi) / 2
+        simple = rdp(body + [body[0]], mid)
+        if simple[0] == simple[-1]:
+            simple = simple[:-1]
+        n = len(simple)
+        best = simple
+        if n > hi:
+            eps_lo = mid
+        elif n < lo:
+            eps_hi = mid
+        else:
+            break
+    if best[0] != best[-1]:
+        best = best + [best[0]]
+    if not (lo - 4 <= len(best) - 1 <= hi + 8):
+        # запас: более грубый проход
+        best = rdp(body + [body[0]], 3.2)
+        if best[0] != best[-1]:
+            best.append(best[0])
+    return best
+
+
 def vectorize(binary: np.ndarray) -> list[tuple[float, float]]:
     hi = upsample(binary, 3)
     raw = marching_loop(hi)
     if len(raw) < 40:
         raise RuntimeError(f"contour too short: {len(raw)}")
     pts = [(x / 3.0, y / 3.0) for x, y in raw]
-    simple = rdp(pts, eps=0.55)
-    if simple[0] != simple[-1]:
-        simple.append(simple[0])
-    if len(simple) < 16:
-        simple = rdp(pts, eps=0.28)
-        if simple[0] != simple[-1]:
-            simple.append(simple[0])
-    return simple
+    return rdp_target(pts, lo=36, hi=42)
 
 
 def path_to_svg_d(pts: list[tuple[float, float]], scale: float, ox: float, oy: float) -> str:
-    parts = []
-    for i, (x, y) in enumerate(pts):
-        cmd = "M" if i == 0 else "L"
-        parts.append(f"{cmd}{x * scale + ox:.2f},{y * scale + oy:.2f}")
-    parts.append("Z")
-    return " ".join(parts)
+    """Замкнутый контур кубиками (Catmull–Rom → Bézier), не ломаная из 800 точек."""
+    if len(pts) < 4:
+        parts = []
+        for i, (x, y) in enumerate(pts):
+            cmd = "M" if i == 0 else "L"
+            parts.append(f"{cmd}{x * scale + ox:.2f},{y * scale + oy:.2f}")
+        parts.append("Z")
+        return " ".join(parts)
+    ring = pts[:-1] if pts[0] == pts[-1] else list(pts)
+    n = len(ring)
+
+    def P(i):
+        x, y = ring[i % n]
+        return (x * scale + ox, y * scale + oy)
+
+    d = [f"M{P(0)[0]:.2f},{P(0)[1]:.2f}"]
+    for i in range(n):
+        p0, p1, p2, p3 = P(i - 1), P(i), P(i + 1), P(i + 2)
+        c1 = (p1[0] + (p2[0] - p0[0]) / 10.0, p1[1] + (p2[1] - p0[1]) / 10.0)
+        c2 = (p2[0] - (p3[0] - p1[0]) / 10.0, p2[1] - (p3[1] - p1[1]) / 10.0)
+        d.append(
+            f"C{c1[0]:.2f},{c1[1]:.2f} {c2[0]:.2f},{c2[1]:.2f} {p2[0]:.2f},{p2[1]:.2f}"
+        )
+    d.append("Z")
+    return " ".join(d)
 
 
 def fit_path(pts, view=1000, margin=80):
@@ -353,6 +394,41 @@ def fit_path(pts, view=1000, margin=80):
     ox = margin + (usable - bw * scale) / 2 - minx * scale
     oy = margin + (usable - bh * scale) / 2 - miny * scale
     return scale, ox, oy
+
+
+def sample_closed_cubic(pts: list[tuple[float, float]], steps=6) -> list[tuple[float, float]]:
+    """Растр с того же кубика, что в SVG — гладкий край без пиксельной пыли."""
+    ring = pts[:-1] if pts and pts[0] == pts[-1] else list(pts)
+    n = len(ring)
+    if n < 3:
+        return list(pts)
+    out = []
+    for i in range(n):
+        p0 = ring[(i - 1) % n]
+        p1 = ring[i]
+        p2 = ring[(i + 1) % n]
+        p3 = ring[(i + 2) % n]
+        c1 = (p1[0] + (p2[0] - p0[0]) / 10.0, p1[1] + (p2[1] - p0[1]) / 10.0)
+        c2 = (p2[0] - (p3[0] - p1[0]) / 10.0, p2[1] - (p3[1] - p1[1]) / 10.0)
+        for s in range(steps):
+            t = s / steps
+            u = 1 - t
+            x = (
+                u * u * u * p1[0]
+                + 3 * u * u * t * c1[0]
+                + 3 * u * t * t * c2[0]
+                + t * t * t * p2[0]
+            )
+            y = (
+                u * u * u * p1[1]
+                + 3 * u * u * t * c1[1]
+                + 3 * u * t * t * c2[1]
+                + t * t * t * p2[1]
+            )
+            out.append((x, y))
+    if out[0] != out[-1]:
+        out.append(out[0])
+    return out
 
 
 def raster_from_path(pts, size, fill, bg=None, margin=0.10, inflate=0):
@@ -437,13 +513,13 @@ def wordmark(px: int, fill) -> Image.Image:
     return out
 
 
-def destline(target_w: int, fill, *, min_px=22, max_px=64) -> Image.Image:
+def destline(target_w: int, fill, *, min_px=34, max_px=52) -> Image.Image:
     lo, hi = min_px, max_px
     best = None
     for _ in range(18):
         mid = (lo + hi) // 2
-        font = ImageFont.truetype(FONT_LINE, mid)
-        im = text_image(LINE, font, fill, tracking=max(1, mid // 28))
+        font = ImageFont.truetype(FONT_SEMI, mid)
+        im = text_image(LINE, font, fill, tracking=max(0, mid // 36))
         best = im
         if im.width > target_w * 1.02:
             hi = mid - 1
@@ -451,7 +527,7 @@ def destline(target_w: int, fill, *, min_px=22, max_px=64) -> Image.Image:
             lo = mid + 1
         else:
             return im
-    return best if best is not None else text_image(LINE, ImageFont.truetype(FONT_LINE, min_px), fill)
+    return best if best is not None else text_image(LINE, ImageFont.truetype(FONT_SEMI, min_px), fill)
 
 
 def horiz(pts, fill, bg, *, with_line=True, w=1800, h=480):
@@ -460,23 +536,22 @@ def horiz(pts, fill, bg, *, with_line=True, w=1800, h=480):
     line = destline(name.width, fill) if with_line else None
     if with_line and line is not None:
         text_h = name.height + 18 + line.height
-        # диагональ оптически легче квадрата — знак чуть выше блока
-        mark_h = int(text_h * 1.42)
-        gap = 64
+        mark_h = int(text_h * 1.85)
+        gap = 52
         block_w = mark_h + gap + max(name.width, line.width)
         x0 = (w - block_w) // 2
         y0 = (h - text_h) // 2
-        mark = raster_from_path(pts, mark_h, fill, None, margin=0.06)
+        mark = raster_from_path(pts, mark_h, fill, None, margin=0.02)
         img.paste(mark, (x0, (h - mark_h) // 2), mark)
         tx = x0 + mark_h + gap
         img.paste(name, (tx, y0), name)
         img.paste(line, (tx, y0 + name.height + 18), line)
     else:
-        mark_h = int(name.height * 2.05)
-        gap = 56
+        mark_h = int(name.height * 2.75)
+        gap = 44
         block_w = mark_h + gap + name.width
         x0 = (w - block_w) // 2
-        mark = raster_from_path(pts, mark_h, fill, None, margin=0.06)
+        mark = raster_from_path(pts, mark_h, fill, None, margin=0.02)
         img.paste(mark, (x0, (h - mark_h) // 2), mark)
         img.paste(name, (x0 + mark_h + gap, (h - name.height) // 2), name)
     return img
@@ -484,9 +559,9 @@ def horiz(pts, fill, bg, *, with_line=True, w=1800, h=480):
 
 def vert(pts, fill, bg, w=1000, h=1280):
     img = Image.new("RGBA", (w, h), (*bg, 255) if bg else (0, 0, 0, 0))
-    mark = raster_from_path(pts, 560, fill, None, margin=0.08)
+    mark = raster_from_path(pts, 620, fill, None, margin=0.03)
     name = wordmark(96, fill)
-    line = destline(int(name.width * 1.04), fill, min_px=22, max_px=40)
+    line = destline(int(name.width * 1.00), fill, min_px=34, max_px=46)
     total = mark.height + 48 + name.height + 14 + line.height
     y = (h - total) // 2
     img.paste(mark, ((w - mark.width) // 2, y), mark)
@@ -589,11 +664,7 @@ def proof_overlay(binary, bbox, pts):
     orig = Image.fromarray(lake, "RGBA")
 
     vec = Image.new("RGBA", orig.size, (0, 0, 0, 0))
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    # pts в координатах binary
-    poly = list(zip(xs, ys))
-    ImageDraw.Draw(vec).polygon(poly, fill=(0, 0, 0, 255))
+    ImageDraw.Draw(vec).polygon(pts if pts[0] == pts[-1] else pts + [pts[0]], fill=(0, 0, 0, 255))
 
     # три панели
     panel_w, panel_h = 720, 780
@@ -648,7 +719,7 @@ def horiz_at(pts, fill, *, with_line, name_px, mark_h, gap, dest_px=None):
     name = wordmark(name_px, fill)
     line = None
     if with_line:
-        font = ImageFont.truetype(FONT_SEMI, dest_px or max(12, int(name_px * 0.42)))
+        font = ImageFont.truetype(FONT_SEMI, dest_px or max(14, int(name_px * 0.48)))
         line = text_image(LINE, font, fill, tracking=0)
         # если линейка заметно короче имени — чуть раздвинуть
         if line.width < name.width * 0.92:
@@ -658,7 +729,7 @@ def horiz_at(pts, fill, *, with_line, name_px, mark_h, gap, dest_px=None):
     h = max(mark_h, text_h) + 8
     w = mark_h + gap + (max(name.width, line.width if line is not None else 0)) + 8
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    mark = raster_from_path(pts, mark_h, fill, None, margin=0.06)
+    mark = raster_from_path(pts, mark_h, fill, None, margin=0.02)
     img.paste(mark, (0, (h - mark_h) // 2), mark)
     tx = mark_h + gap
     ty = (h - text_h) // 2
@@ -669,27 +740,50 @@ def horiz_at(pts, fill, *, with_line, name_px, mark_h, gap, dest_px=None):
 
 
 def proof_header(pts):
-    """Шапка в реальном кегле, не даунскейл постера."""
+    """Шапка = знак+имя. Бланк = + линейка читаемым кеглем."""
     bar = Image.new("RGB", (1440, 88), CREAM)
-    lock = horiz_at(pts, BAIKAL, with_line=True, name_px=28, mark_h=64, gap=18, dest_px=15)
+    lock = horiz_at(pts, BAIKAL, with_line=False, name_px=28, mark_h=72, gap=14)
     bar.paste(lock, (24, (88 - lock.height) // 2), lock)
     d = ImageDraw.Draw(bar)
     d.rounded_rectangle((1220, 24, 1408, 64), radius=8, fill=ORANGE)
     f = ImageFont.truetype(FONT_UI, 16)
     d.text((1250, 34), "Оставить заявку", font=f, fill=WHITE)
+    bar.save(PROOF / "C-shapaka-bez-linejki.png")
     bar.save(PROOF / "C-shapaka-linejka.png")
 
     bar2 = Image.new("RGB", (390, 64), CREAM)
-    lock2 = horiz_at(pts, BAIKAL, with_line=False, name_px=22, mark_h=44, gap=12)
+    lock2 = horiz_at(pts, BAIKAL, with_line=False, name_px=22, mark_h=48, gap=12)
     bar2.paste(lock2, (10, (64 - lock2.height) // 2), lock2)
     bar2.save(PROOF / "C-mobil-bez-linejki.png")
+
+    blank = Image.new("RGB", (1440, 220), WHITE)
+    lock3 = horiz_at(pts, BAIKAL, with_line=True, name_px=36, mark_h=96, gap=20, dest_px=16)
+    blank.paste(lock3, (48, (220 - lock3.height) // 2), lock3)
+    ImageDraw.Draw(blank).text(
+        (48, 16),
+        "бланк — линейка только здесь",
+        font=ImageFont.truetype(FONT_UI, 16),
+        fill=(90, 90, 90),
+    )
+    blank.save(PROOF / "C-blank-linejka.png")
+
+    cmp = Image.new("RGB", (1600, 280), CREAM)
+    old = horiz_at(pts, BAIKAL, with_line=False, name_px=26, mark_h=40, gap=18)
+    new = horiz_at(pts, BAIKAL, with_line=False, name_px=28, mark_h=72, gap=14)
+    lab = ImageFont.truetype(FONT_UI, 18)
+    ImageDraw.Draw(cmp).text((40, 16), "шапка было (росчерк)", font=lab, fill=BAIKAL)
+    ImageDraw.Draw(cmp).text((40, 150), "шапка стало (пятно знака)", font=lab, fill=BAIKAL)
+    cmp.paste(old, (40, 48), old)
+    cmp.paste(new, (40, 186), new)
+    cmp.save(PROOF / "C-shapaka-bylo-stalo.png")
 
 
 def proof_scales(pts):
     row = Image.new("RGB", (720, 160), WHITE)
     x = 24
     for s in (16, 24, 32, 48):
-        m = raster_from_path(pts, s, BLACK, WHITE, margin=0.06)
+        inf = 2 if s <= 24 else 1
+        m = raster_from_path(pts, s, BLACK, WHITE, margin=0.04, inflate=inf)
         cell = Image.new("RGB", (s + 16, s + 16), (235, 235, 235))
         cell.paste(m, (8, 8))
         row.paste(cell, (x, 48))
@@ -808,10 +902,12 @@ def main():
         slovo(fg, bg).save(PNG / f"05-slovo-{key}.png")
 
     for s in (16, 24, 32, 48):
-        inflate = 1 if s <= 24 else 0
-        raster_from_path(pts, s, BAIKAL, None, margin=0.06, inflate=inflate).save(PNG / f"06-znak-{s}.png")
-        raster_from_path(pts, s, BLACK, WHITE, margin=0.06, inflate=inflate).save(PROOF / f"znak-{s}.png")
-        raster_from_path(pts, s, WHITE, BAIKAL, margin=0.14, inflate=1).save(PNG / f"05-avatar-{s}.png")
+        inflate = 2 if s <= 24 else 1
+        raster_from_path(pts, s, BAIKAL, None, margin=0.04, inflate=inflate).save(PNG / f"06-znak-{s}.png")
+        raster_from_path(pts, s, BLACK, WHITE, margin=0.04, inflate=inflate).save(PROOF / f"znak-{s}.png")
+        raster_from_path(pts, s, WHITE, BAIKAL, margin=0.10, inflate=2).save(PNG / f"05-avatar-{s}.png")
+    raster_from_path(pts, 256, WHITE, BAIKAL, margin=0.12, inflate=2).save(PNG / "07-avatar-telegram.png")
+    raster_from_path(pts, 256, WHITE, BAIKAL, margin=0.12, inflate=2).save(PNG / "07-pechat.png")
 
     pict_altai(640, BAIKAL, CREAM).save(PNG / "08-altai.png")
     pict_mongolia(640, BAIKAL, CREAM).save(PNG / "08-mongolia.png")
@@ -844,7 +940,7 @@ def main():
         fill=(90, 90, 90),
     )
     strip.save(PROOF / "B-imya-unicode.png")
-    print("pts", len(pts), "bbox", bbox, "mask", binary.sum())
+    print("pts", len(pts) - (1 if pts and pts[0] == pts[-1] else 0), "bbox", bbox, "mask", binary.sum())
 
 
 if __name__ == "__main__":
