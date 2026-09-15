@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Lockups from the site Baikal contour. Do not invent a new silhouette."""
+"""Устарело. Актуальная сборка: build_sistema.py."""
+raise SystemExit("use build_sistema.py")
+
+# Lockups from the site Baikal contour. Do not invent a new silhouette.
 
 from pathlib import Path
 

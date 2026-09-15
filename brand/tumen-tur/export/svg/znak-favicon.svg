@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1000 1000">
-  
-  <mask id="m"><image href="site-baikal-mask.png" x="80" y="80" width="840" height="840"/></mask>
-  <rect width="1000" height="1000" fill="#124B56" mask="url(#m)"/>
-</svg>
