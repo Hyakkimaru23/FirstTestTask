@@ -55,89 +55,130 @@ def _catmull(points: np.ndarray, samples: int = 12) -> np.ndarray:
     return np.array(out)
 
 
-def _centerline_lake(*, chunky: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Parametric Baikal: checkmark axis, south basin, Olkhon waist.
+def _unit(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    return v / n if n > 1e-9 else v
 
-    Returns centerline, west half-widths, east half-widths in local units.
+
+def _rot90(v: np.ndarray) -> np.ndarray:
+    return np.array([-v[1], v[0]])
+
+
+def _line_hit(p: np.ndarray, d: np.ndarray, q: np.ndarray, e: np.ndarray) -> np.ndarray:
+    a = np.array([d, -e], dtype=float).T
+    if abs(np.linalg.det(a)) < 1e-8:
+        return (p + q) * 0.5
+    t = np.linalg.solve(a, q - p)
+    return p + t[0] * d
+
+
+def _cap(a: np.ndarray, b: np.ndarray, outward: np.ndarray, n: int = 8) -> np.ndarray:
+    mid = (a + b) * 0.5
+    v0 = a - mid
+
+    def rot(v, ang):
+        c, s = math.cos(ang), math.sin(ang)
+        return np.array([v[0] * c - v[1] * s, v[0] * s + v[1] * c])
+
+    sign = 1.0 if np.dot(rot(v0, math.pi / 2), outward) >= 0 else -1.0
+    return np.array([mid + rot(v0, sign * math.pi * i / n) for i in range(1, n)])
+
+
+def _offset_poly(pts: np.ndarray, dist: np.ndarray | float) -> np.ndarray:
+    """Miter offset. dist may be a scalar or per-vertex half-width."""
+    w = np.full(len(pts), float(dist)) if np.isscalar(dist) else np.asarray(dist, dtype=float)
+    out = []
+    for i, p in enumerate(pts):
+        if i == 0:
+            t = _unit(pts[1] - pts[0])
+            out.append(p + _rot90(t) * w[i])
+        elif i == len(pts) - 1:
+            t = _unit(pts[-1] - pts[-2])
+            out.append(p + _rot90(t) * w[i])
+        else:
+            t0 = _unit(pts[i] - pts[i - 1])
+            t1 = _unit(pts[i + 1] - pts[i])
+            n0, n1 = _rot90(t0), _rot90(t1)
+            out.append(_line_hit(pts[i - 1] + n0 * w[i], t0, pts[i + 1] + n1 * w[i], -t1))
+    return np.array(out)
+
+
+def baikal_parts(*, chunky: bool = False) -> tuple[np.ndarray, np.ndarray | None]:
+    """Baikal as a bent rift: two legs, even band, one Olkhon bay.
+
+    Not a tapered swirl (that read as a turd). Not a pill with a USB slot.
+    No inner hole — a slot in a stick is a flash drive.
     """
-    # 8 structural stations along the lake (south → north).
-    # x = along-axis, y = crescent toward SE (the «галочка» bend).
+    # Spine already bent like the map: south more N–S, north kicks NE.
     if not chunky:
-        stations = np.array(
+        spine = np.array(
             [
-                #    x     y     west   east
-                [0.00, 0.00, 0.054, 0.060],
-                [0.12, 0.008, 0.074, 0.078],
-                [0.26, 0.024, 0.062, 0.068],
-                [0.38, 0.048, 0.026, 0.052],  # Olkhon waist — keep sharp
-                [0.48, 0.082, 0.046, 0.062],  # kink toward NE
-                [0.64, 0.132, 0.050, 0.054],
-                [0.84, 0.188, 0.044, 0.044],
-                [1.00, 0.236, 0.040, 0.040],
-            ]
+                [0.00, 0.00],
+                [0.20, 0.022],
+                [0.38, 0.088],  # kink / Olkhon
+                [0.66, 0.210],
+                [1.00, 0.355],
+            ],
+            dtype=float,
         )
+        widths = np.array([0.058, 0.062, 0.050, 0.048, 0.044])  # south basin, not a tadpole
+        bay_i = 2
+        bay_depth = 0.034
+        bay_half = 0.058
     else:
-        stations = np.array(
+        spine = np.array(
             [
-                [0.00, 0.00, 0.080, 0.086],
-                [0.13, 0.008, 0.108, 0.112],
-                [0.27, 0.022, 0.088, 0.094],
-                [0.39, 0.048, 0.028, 0.070],
-                [0.50, 0.080, 0.068, 0.082],
-                [0.66, 0.126, 0.074, 0.076],
-                [0.84, 0.176, 0.064, 0.064],
-                [1.00, 0.218, 0.058, 0.058],
-            ]
+                [0.00, 0.00],
+                [0.24, 0.024],
+                [0.42, 0.088],
+                [0.70, 0.188],
+                [1.00, 0.300],
+            ],
+            dtype=float,
         )
+        widths = np.array([0.078, 0.082, 0.066, 0.064, 0.060])
+        bay_i = 2
+        bay_depth = 0.048
+        bay_half = 0.075
 
-    t = np.linspace(0, 1, 160)
-    xs = np.interp(t, np.linspace(0, 1, len(stations)), stations[:, 0])
-    ys = np.interp(t, np.linspace(0, 1, len(stations)), stations[:, 1])
-    ww = np.interp(t, np.linspace(0, 1, len(stations)), stations[:, 2])
-    ew = np.interp(t, np.linspace(0, 1, len(stations)), stations[:, 3])
-    ww, ew = _smooth(ww, 7), _smooth(ew, 7)
-    center = np.stack([xs, ys], axis=1)
-    return center, ww, ew
+    east = _offset_poly(spine, widths)
+    west = _offset_poly(spine, -widths)
+
+    # Open Olkhon bay — dent in the west shore, not a hole and not a swirl.
+    t_in = _unit(spine[bay_i] - spine[bay_i - 1])
+    t_out = _unit(spine[bay_i + 1] - spine[bay_i])
+    n_in, n_out = _rot90(t_in), _rot90(t_out)
+    n_bay = _unit(n_in + n_out)
+    p = spine[bay_i]
+    bay = np.array(
+        [
+            p - t_in * bay_half - n_in * widths[bay_i],
+            p - t_in * (bay_half * 0.12) + n_bay * (bay_depth * 0.72),
+            p + n_bay * bay_depth,
+            p + t_out * (bay_half * 0.12) + n_bay * (bay_depth * 0.72),
+            p + t_out * bay_half - n_out * widths[bay_i],
+        ]
+    )
+    west = np.vstack([west[:bay_i], bay, west[bay_i + 1 :]])
+
+    t0 = _unit(spine[1] - spine[0])
+    tN = _unit(spine[-1] - spine[-2])
+    south_cap = _cap(east[0], west[0], -t0, 9)
+    north_cap = _cap(west[-1], east[-1], tN, 9)
+
+    outer = np.vstack([west, north_cap, east[::-1], south_cap])
+
+    ang = math.radians(-42 if not chunky else -44)
+    rot = np.array([[math.cos(ang), -math.sin(ang)], [math.sin(ang), math.cos(ang)]])
+    outer = outer @ rot.T
+    mn, mx = outer.min(0), outer.max(0)
+    outer = (outer - mn) / (mx - mn)
+    return outer, None
 
 
 def baikal_polygon(n: int = 280, *, chunky: bool = False) -> np.ndarray:
-    center, ww, ew = _centerline_lake(chunky=chunky)
-    d = np.gradient(center, axis=0)
-    hyp = np.clip(np.linalg.norm(d, axis=1), 1e-6, None)
-    tan = d / hyp[:, None]
-    # Normal: rotate tangent +90° (toward +y / east).
-    nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
-
-    west = center - nrm * ww[:, None]
-    east = center + nrm * ew[:, None]
-
-    def arc_cap(p_a: np.ndarray, p_b: np.ndarray, outward: np.ndarray) -> np.ndarray:
-        mid = (p_a + p_b) * 0.5
-        v0 = p_a - mid
-        def rot(v, ang):
-            c, s = math.cos(ang), math.sin(ang)
-            return np.array([v[0] * c - v[1] * s, v[0] * s + v[1] * c])
-        sign = 1.0 if np.dot(rot(v0, math.pi / 2), outward) >= np.dot(rot(v0, -math.pi / 2), outward) else -1.0
-        return np.array([mid + rot(v0, sign * math.pi * k / 10) for k in range(1, 10)])
-
-    north_cap = arc_cap(west[-1], east[-1], tan[-1])
-    south_cap = arc_cap(east[0], west[0], -tan[0])
-    poly = np.vstack([west, north_cap, east[::-1], south_cap])
-    k = 3
-    pad = k // 2
-    ext = np.vstack([poly[-pad:], poly, poly[:pad]])
-    ker = np.ones(k) / k
-    poly = np.stack(
-        [np.convolve(ext[:, 0], ker, mode="valid"), np.convolve(ext[:, 1], ker, mode="valid")],
-        axis=1,
-    )
-
-    ang = math.radians(-34 if not chunky else -36)
-    c, s = math.cos(ang), math.sin(ang)
-    poly = poly @ np.array([[c, -s], [s, c]]).T
-    mn, mx = poly.min(0), poly.max(0)
-    poly = (poly - mn) / (mx - mn)
-    return poly
+    outer, _ = baikal_parts(chunky=chunky)
+    return outer
 
 
 def poly_to_pixels(poly: np.ndarray, size: int, margin: float = 0.14) -> list[tuple[int, int]]:
@@ -157,15 +198,16 @@ def render_mark(
     mode = "RGBA"
     img = Image.new(mode, (size, size), (*bg, 255) if bg else (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pts = poly_to_pixels(baikal_polygon(chunky=chunky), size, margin=margin)
-    draw.polygon(pts, fill=(*fill, 255))
+    outer, hole = baikal_parts(chunky=chunky)
+    draw.polygon(poly_to_pixels(outer, size, margin=margin), fill=(*fill, 255))
+    if hole is not None:
+        cut = (0, 0, 0, 0) if bg is None else (*bg, 255)
+        draw.polygon(poly_to_pixels(hole, size, margin=margin), fill=cut)
     return img
 
 
 def svg_path(poly: np.ndarray, size: int = 1000, margin: float = 0.14) -> str:
     pts = np.array(poly_to_pixels(poly, size, margin=margin), dtype=float)
-    # Smooth to cubics with Catmull-Rom-ish midpoints (simple polyline is enough
-    # and safer for embroidery). Keep as closed polygon path.
     cmds = [f"M {pts[0,0]:.1f} {pts[0,1]:.1f}"]
     for x, y in pts[1:]:
         cmds.append(f"L {x:.1f} {y:.1f}")
@@ -173,13 +215,17 @@ def svg_path(poly: np.ndarray, size: int = 1000, margin: float = 0.14) -> str:
     return " ".join(cmds)
 
 
-def write_svg(path: Path, d: str, fill: str, bg: str | None, size: int = 1000) -> None:
+def write_svg(path: Path, fill: str, bg: str | None, *, chunky: bool = False, size: int = 1000) -> None:
+    outer, hole = baikal_parts(chunky=chunky)
+    d = svg_path(outer, size)
+    if hole is not None:
+        d = f"{d} {svg_path(hole, size)}"
     bg_rect = f'<rect width="{size}" height="{size}" fill="{bg}"/>' if bg else ""
     path.write_text(
         f'''<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" width="{size}" height="{size}">
   {bg_rect}
-  <path fill="{fill}" d="{d}"/>
+  <path fill="{fill}" fill-rule="evenodd" d="{d}"/>
 </svg>
 '''
     )
@@ -340,15 +386,10 @@ def main() -> None:
         "0x440",
     ], NAME
 
-    poly = baikal_polygon(chunky=False)
-    poly_s = baikal_polygon(chunky=True)
-    d = svg_path(poly)
-    d_s = svg_path(poly_s)
-
-    write_svg(SVG / "znak.svg", d, hex_of(BAIKAL), None)
-    write_svg(SVG / "znak-chernyj.svg", d, hex_of(BLACK), hex_of(WHITE))
-    write_svg(SVG / "znak-belyj.svg", d, hex_of(WHITE), hex_of(DARK))
-    write_svg(SVG / "znak-favicon.svg", d_s, hex_of(BAIKAL), None)
+    write_svg(SVG / "znak.svg", hex_of(BAIKAL), None)
+    write_svg(SVG / "znak-chernyj.svg", hex_of(BLACK), hex_of(WHITE))
+    write_svg(SVG / "znak-belyj.svg", hex_of(WHITE), hex_of(DARK))
+    write_svg(SVG / "znak-favicon.svg", hex_of(BAIKAL), None, chunky=True)
 
     # A — black mark on white (approval size ~40 mm @ 300 dpi ≈ 472 px; we use 1024).
     a = render_mark(1024, BLACK, WHITE, chunky=False, margin=0.16)
@@ -440,24 +481,15 @@ def main() -> None:
     fd.text((314, 1060), "40 mm", font=font_s, fill=(90, 90, 90))
     frame.save(PROOF / "A-chernyj-40mm.png")
 
-    # Round comparison if the earlier AI rasters are on disk
-    rounds = [
-        Path("/opt/cursor/artifacts/assets/tumen-mark-a1-black.png"),
-        Path("/opt/cursor/artifacts/assets/tumen-mark-a2-black.png"),
-        Path("/opt/cursor/artifacts/assets/tumen-mark-a3-black.png"),
-        PNG / "01-znak-chernyj-na-belom.png",
-    ]
-    if all(p.exists() for p in rounds):
-        cmp = sheet((1400, 400), WHITE)
+    old = PROOF / "old-poop.png"
+    if old.exists():
+        cmp = sheet((1100, 520), WHITE)
         cd = ImageDraw.Draw(cmp)
-        labels = ["A1 карта", "A2 пальцы", "A3 толще", "A финал"]
-        for i, (p, lab) in enumerate(zip(rounds, labels)):
-            im = Image.open(p).convert("RGBA")
-            box = (30 + i * 340, 50, 30 + i * 340 + 320, 370)
-            cd.rectangle(box, outline=(220, 220, 220), width=1)
-            paste_c(cmp, im, box)
-            cd.text((box[0], 18), lab, font=font_s, fill=BLACK)
-        cmp.save(PROOF / "A-krugi-sravnenie.png")
+        cd.text((40, 20), "было", font=font_s, fill=BLACK)
+        cd.text((580, 20), "стало", font=font_s, fill=BLACK)
+        paste_c(cmp, Image.open(old).convert("RGBA"), (40, 60, 520, 500))
+        paste_c(cmp, Image.open(PNG / "01-znak-chernyj-na-belom.png").convert("RGBA"), (580, 60, 1060, 500))
+        cmp.save(PROOF / "A-bylo-stalo.png")
 
     print("built", PNG)
     print("name", NAME, [hex(ord(c)) for c in NAME])
