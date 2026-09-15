@@ -346,41 +346,29 @@ def rdp_target(pts: list[tuple[float, float]], lo=24, hi=40) -> list[tuple[float
     return best
 
 
+MASTER: np.ndarray | None = None
+
+
 def vectorize(binary: np.ndarray) -> list[tuple[float, float]]:
+    """Плотный контур для SVG. Растр знака идёт с маски, не с 38-угольника."""
     hi = upsample(binary, 3)
     raw = marching_loop(hi)
     if len(raw) < 40:
         raise RuntimeError(f"contour too short: {len(raw)}")
     pts = [(x / 3.0, y / 3.0) for x, y in raw]
-    return rdp_target(pts, lo=36, hi=42)
+    simple = rdp(pts, eps=0.65)
+    if simple[0] != simple[-1]:
+        simple.append(simple[0])
+    return simple
 
 
 def path_to_svg_d(pts: list[tuple[float, float]], scale: float, ox: float, oy: float) -> str:
-    """Замкнутый контур кубиками (Catmull–Rom → Bézier), не ломаная из 800 точек."""
-    if len(pts) < 4:
-        parts = []
-        for i, (x, y) in enumerate(pts):
-            cmd = "M" if i == 0 else "L"
-            parts.append(f"{cmd}{x * scale + ox:.2f},{y * scale + oy:.2f}")
-        parts.append("Z")
-        return " ".join(parts)
-    ring = pts[:-1] if pts[0] == pts[-1] else list(pts)
-    n = len(ring)
-
-    def P(i):
-        x, y = ring[i % n]
-        return (x * scale + ox, y * scale + oy)
-
-    d = [f"M{P(0)[0]:.2f},{P(0)[1]:.2f}"]
-    for i in range(n):
-        p0, p1, p2, p3 = P(i - 1), P(i), P(i + 1), P(i + 2)
-        c1 = (p1[0] + (p2[0] - p0[0]) / 10.0, p1[1] + (p2[1] - p0[1]) / 10.0)
-        c2 = (p2[0] - (p3[0] - p1[0]) / 10.0, p2[1] - (p3[1] - p1[1]) / 10.0)
-        d.append(
-            f"C{c1[0]:.2f},{c1[1]:.2f} {c2[0]:.2f},{c2[1]:.2f} {p2[0]:.2f},{p2[1]:.2f}"
-        )
-    d.append("Z")
-    return " ".join(d)
+    parts = []
+    for i, (x, y) in enumerate(pts):
+        cmd = "M" if i == 0 else "L"
+        parts.append(f"{cmd}{x * scale + ox:.2f},{y * scale + oy:.2f}")
+    parts.append("Z")
+    return " ".join(parts)
 
 
 def fit_path(pts, view=1000, margin=80):
@@ -432,35 +420,26 @@ def sample_closed_cubic(pts: list[tuple[float, float]], steps=6) -> list[tuple[f
 
 
 def raster_from_path(pts, size, fill, bg=None, margin=0.10, inflate=0):
+    """Знак = маска с сайта. Суперсэмпл + жёсткий порог: не лего и не размытие."""
     img = Image.new("RGBA", (size, size), (*bg, 255) if bg else (0, 0, 0, 0))
-    if len(pts) < 3:
+    src = MASTER
+    if src is None:
         return img
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    minx, maxx = min(xs), max(xs)
-    miny, maxy = min(ys), max(ys)
-    bw, bh = max(1.0, maxx - minx), max(1.0, maxy - miny)
-    usable = size * (1 - 2 * margin)
-    scale = usable / max(bw, bh)
-    ox = (size - bw * scale) / 2 - minx * scale
-    oy = (size - bh * scale) / 2 - miny * scale
-    poly = [(x * scale + ox, y * scale + oy) for x, y in pts]
-    work = size if inflate <= 0 else size + inflate * 4
+    sq = square_pad(src, margin)
+    hi = max(size * 4, 256)
+    sil = Image.fromarray((sq.astype(np.uint8) * 255), "L").resize(
+        (hi, hi), Image.Resampling.NEAREST
+    )
     if inflate > 0:
-        canvas = Image.new("L", (work, work), 0)
-        shift = (work - size) / 2
-        poly2 = [(x + shift, y + shift) for x, y in poly]
-        ImageDraw.Draw(canvas).polygon(poly2, fill=255)
-        canvas = canvas.filter(ImageFilter.MaxFilter(inflate * 2 + 1))
-        canvas = canvas.resize((size, size), Image.Resampling.LANCZOS)
-        rgba = np.zeros((size, size, 4), dtype=np.uint8)
-        m = np.array(canvas)
-        rgba[m > 90] = (*fill, 255)
-        layer = Image.fromarray(rgba, "RGBA")
-        img.paste(layer, (0, 0), layer)
-        return img
-    draw = ImageDraw.Draw(img)
-    draw.polygon(poly, fill=(*fill, 255))
+        k = min(hi - 1, inflate * 2 + 1)
+        if k >= 3 and k % 2 == 1:
+            sil = sil.filter(ImageFilter.MaxFilter(k))
+    sil = sil.resize((size, size), Image.Resampling.BOX)
+    pix = np.array(sil)
+    rgba = np.zeros((size, size, 4), dtype=np.uint8)
+    rgba[pix > 160] = (*fill, 255)
+    layer = Image.fromarray(rgba, "RGBA")
+    img.paste(layer, (0, 0), layer)
     return img
 
 
@@ -880,7 +859,9 @@ def main():
         p = PNG / name
         if p.exists():
             p.unlink()
+    global MASTER
     binary, bbox = extract_site_lake()
+    MASTER = binary
     save_mask(binary)
     pts = vectorize(binary)
 
@@ -902,12 +883,12 @@ def main():
         slovo(fg, bg).save(PNG / f"05-slovo-{key}.png")
 
     for s in (16, 24, 32, 48):
-        inflate = 2 if s <= 24 else 1
-        raster_from_path(pts, s, BAIKAL, None, margin=0.04, inflate=inflate).save(PNG / f"06-znak-{s}.png")
-        raster_from_path(pts, s, BLACK, WHITE, margin=0.04, inflate=inflate).save(PROOF / f"znak-{s}.png")
-        raster_from_path(pts, s, WHITE, BAIKAL, margin=0.10, inflate=2).save(PNG / f"05-avatar-{s}.png")
-    raster_from_path(pts, 256, WHITE, BAIKAL, margin=0.12, inflate=2).save(PNG / "07-avatar-telegram.png")
-    raster_from_path(pts, 256, WHITE, BAIKAL, margin=0.12, inflate=2).save(PNG / "07-pechat.png")
+        inflate = 1 if s <= 16 else 0
+        raster_from_path(pts, s, BAIKAL, None, margin=0.06, inflate=inflate).save(PNG / f"06-znak-{s}.png")
+        raster_from_path(pts, s, BLACK, WHITE, margin=0.06, inflate=inflate).save(PROOF / f"znak-{s}.png")
+        raster_from_path(pts, s, WHITE, BAIKAL, margin=0.12, inflate=inflate).save(PNG / f"05-avatar-{s}.png")
+    raster_from_path(pts, 256, WHITE, BAIKAL, margin=0.12, inflate=0).save(PNG / "07-avatar-telegram.png")
+    raster_from_path(pts, 256, WHITE, BAIKAL, margin=0.12, inflate=0).save(PNG / "07-pechat.png")
 
     pict_altai(640, BAIKAL, CREAM).save(PNG / "08-altai.png")
     pict_mongolia(640, BAIKAL, CREAM).save(PNG / "08-mongolia.png")
