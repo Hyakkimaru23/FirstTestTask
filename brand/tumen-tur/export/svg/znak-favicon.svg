@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1000 1000">
   
-  <path fill="#124B56" fill-rule="evenodd" d="M 160.0 698.0 L 291.0 512.0 L 373.0 468.0 L 442.0 543.0 L 451.0 553.0 L 453.0 535.0 L 466.0 396.0 L 604.0 291.0 L 803.0 146.0 L 817.0 140.0 L 831.0 143.0 L 844.0 154.0 L 854.0 171.0 L 859.0 194.0 L 860.0 218.0 L 856.0 241.0 L 848.0 261.0 L 836.0 274.0 L 639.0 427.0 L 456.0 572.0 L 349.0 677.0 L 225.0 840.0 L 209.0 855.0 L 191.0 860.0 L 173.0 854.0 L 157.0 837.0 L 146.0 812.0 L 140.0 782.0 L 141.0 750.0 L 147.0 721.0 Z"/>
+  <mask id="m"><image href="site-baikal-mask.png" x="80" y="80" width="840" height="840"/></mask>
+  <rect width="1000" height="1000" fill="#124B56" mask="url(#m)"/>
 </svg>

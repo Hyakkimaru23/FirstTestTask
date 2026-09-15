@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent
+MASK = ROOT / "source" / "site-baikal-mask.png"
 OUT = ROOT / "export"
 PNG = OUT / "png"
 SVG = OUT / "svg"
@@ -195,14 +196,27 @@ def render_mark(
     chunky: bool = False,
     margin: float = 0.14,
 ) -> Image.Image:
-    mode = "RGBA"
-    img = Image.new(mode, (size, size), (*bg, 255) if bg else (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    outer, hole = baikal_parts(chunky=chunky)
-    draw.polygon(poly_to_pixels(outer, size, margin=margin), fill=(*fill, 255))
-    if hole is not None:
-        cut = (0, 0, 0, 0) if bg is None else (*bg, 255)
-        draw.polygon(poly_to_pixels(hole, size, margin=margin), fill=cut)
+    """Site-logo Baikal contour. Do not invent a new blob."""
+    from PIL import ImageFilter
+
+    img = Image.new("RGBA", (size, size), (*bg, 255) if bg else (0, 0, 0, 0))
+    raw = Image.open(MASK).convert("L")
+    arr = np.array(raw)
+    # Source is white lake on black.
+    if arr.mean() < 127:
+        lake = arr
+    else:
+        lake = arr
+    sil = Image.fromarray(lake)
+    usable = max(8, int(size * (1 - 2 * margin)))
+    sil = sil.resize((usable, usable), Image.Resampling.BILINEAR)
+    if chunky:
+        sil = sil.filter(ImageFilter.MaxFilter(3 if usable >= 24 else 1))
+    pix = np.array(sil)
+    rgba = np.zeros((usable, usable, 4), dtype=np.uint8)
+    rgba[pix > 90] = (*fill, 255)
+    layer = Image.fromarray(rgba, "RGBA")
+    img.paste(layer, ((size - usable) // 2, (size - usable) // 2), layer)
     return img
 
 
@@ -216,16 +230,19 @@ def svg_path(poly: np.ndarray, size: int = 1000, margin: float = 0.14) -> str:
 
 
 def write_svg(path: Path, fill: str, bg: str | None, *, chunky: bool = False, size: int = 1000) -> None:
-    outer, hole = baikal_parts(chunky=chunky)
-    d = svg_path(outer, size)
-    if hole is not None:
-        d = f"{d} {svg_path(hole, size)}"
+    """Site contour as mask — do not replace with a drawn blob."""
+    href = "site-baikal-mask.png"
+    dest = path.parent / href
+    dest.write_bytes(MASK.read_bytes())
     bg_rect = f'<rect width="{size}" height="{size}" fill="{bg}"/>' if bg else ""
     path.write_text(
         f'''<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" width="{size}" height="{size}">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {size} {size}" width="{size}" height="{size}">
   {bg_rect}
-  <path fill="{fill}" fill-rule="evenodd" d="{d}"/>
+  <mask id="baikal" maskUnits="userSpaceOnUse">
+    <image xlink:href="{href}" href="{href}" x="80" y="80" width="840" height="840"/>
+  </mask>
+  <rect width="{size}" height="{size}" fill="{fill}" mask="url(#baikal)"/>
 </svg>
 '''
     )
