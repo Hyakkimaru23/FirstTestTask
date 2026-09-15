@@ -40,3 +40,5 @@
 - `export/png/08-altai.png`, `08-mongolia.png` — не вместо логотипа
 - `export/proof/A-naklozhenie.png` — наложение с сайтом
 - `export/proof/A-chernyj-40mm.png` — чёрный контур 40 мм
+
+Промпт на правку слабых сторон (не новый бренд): `docs/tumen-tur-prompt-iii-slabosti.md`.
